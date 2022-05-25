@@ -1,0 +1,137 @@
+---
+- hosts: all
+  become: true
+  tasks:
+  - name: Install packages that allow apt to be used over HTTPS
+    apt:
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+    vars:
+      packages:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg-agent
+      - software-properties-common
+
+  - name: Add an apt signing key for Docker
+    apt_key:
+      url: https://download.docker.com/linux/debian/gpg
+      state: present
+
+  - name: Add apt repository for stable version
+    apt_repository:
+      repo: deb [arch=amd64] https://download.docker.com/linux/debian buster stable
+      state: present
+
+  - name: Install docker and its dependecies
+    apt: 
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+    vars:
+      packages:
+      - docker-ce 
+      - docker-ce-cli 
+      - containerd.io
+    notify:
+      - docker status
+
+  - name: Add vagrant user to docker group
+    user:
+      name: vagrant
+      group: docker
+
+  - name: Remove swapfile from /etc/fstab
+    mount:
+      name: "{{ item }}"
+      fstype: swap
+      state: absent
+    with_items:
+      - swap
+      - none
+
+  - name: Disable swap
+    command: swapoff -a
+    when: ansible_swaptotal_mb > 0
+
+  - name: Add an apt signing key for Kubernetes
+    apt_key:
+      url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+      state: present
+
+  - name: Adding apt repository for Kubernetes
+    apt_repository:
+      repo: deb https://apt.kubernetes.io/ kubernetes-xenial main
+      state: present
+      filename: kubernetes.list
+
+  - name: Install Kubernetes binaries
+    apt: 
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+    vars:
+      packages:
+        - kubelet 
+        - kubeadm 
+        - kubectl
+
+  - name: Configure node ip
+    lineinfile:
+      path: /etc/default/kubelet
+      line: KUBELET_EXTRA_ARGS=--node-ip={{ node_ip }}
+      create: yes
+
+  - name: Restart kubelet
+    service:
+      name: kubelet
+      daemon_reload: yes
+      state: restarted
+
+  - name: Check if kubelet.service.d configuration registers cgroup-driver
+    become: yes
+    shell: 'cat /etc/systemd/system/kubelet.service.d/10-kubeadm.conf | grep "cgroup-driver" | cat'
+    register: cgroup_set
+
+  - name: Ensure kubeadm cgroup-driver is same as docker's cgroup-driver 
+    ansible.builtin.replace:
+            path: /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+            regexp: '(?<=cgroup-driver=)(\w+)'
+            replace: 'cgroupfs '
+    when: cgroup_set.stdout != ""
+
+  - name: If kubeadm have no cgoup-driver setting, add one (1)
+    ansible.builtin.lineinfile:
+            path: /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+            insertafter: "[Service]"
+            line: "Environment='KUBELET_CGROUP_ARGS=--cgroup-driver=cgroupfs'"
+    when: cgroup_set.stdout == ""
+
+  - name: If kubeadm have no cgoup-driver setting, add one (2)
+    ansible.builtin.replace:
+            path: /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+            regexp: 'ExecStart=\/usr\/bin\/kubelet'
+            replace: 'ExecStart=/usr/bin/kubelet $KUBELET_CGROUP_ARGS'
+    when: cgroup_set.stdout == ""
+
+  - name: Copy the join command to server location
+    copy: src=join-command dest=/tmp/join-command.sh mode=0777
+
+  - name: Remove containerd config since by default it has `disabled_plugins = ["cri"]` (Container Runtime Interface)
+    ansible.builtin.file:
+      path: /etc/containerd/config.toml
+      state: absent
+
+  - name: Restart containerd service
+    ansible.builtin.systemd:
+      state: restarted
+      name: containerd
+
+  - name: Join the node to cluster
+    command: sh /tmp/join-command.sh
+
+  handlers:
+    - name: docker status
+      service: name=docker state=started

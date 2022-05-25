@@ -1,0 +1,246 @@
+---
+- hosts: all
+  vars:
+    kubernetes_dashboard_version: v2.5.0
+  become: true
+  tasks:
+  - name: Install packages that allow apt to be used over HTTPS
+    apt:
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+    vars:
+      packages:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg-agent
+      - software-properties-common
+
+  - name: Add an apt signing key for Docker
+    apt_key:
+      url: https://download.docker.com/linux/debian/gpg
+      state: present
+
+  - name: Add apt repository for stable version
+    apt_repository:
+      repo: deb [arch=amd64] https://download.docker.com/linux/debian buster stable
+      state: present
+
+  - name: Install docker and its dependecies
+    apt: 
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+    vars:
+      packages:
+      - docker-ce 
+      - docker-ce-cli 
+      - containerd.io
+    notify:
+      - docker status
+
+  - name: Add vagrant user to docker group
+    user:
+      name: vagrant
+      group: docker
+  
+  - name: Remove swapfile from /etc/fstab
+    mount:
+      name: "{{ item }}"
+      fstype: swap
+      state: absent
+    with_items:
+      - swap
+      - none
+
+  - name: Disable swap
+    command: swapoff -a
+    when: ansible_swaptotal_mb > 0
+
+  - name: Add an apt signing key for Kubernetes
+    apt_key:
+      url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+      state: present
+
+  - name: Adding apt repository for Kubernetes
+    apt_repository:
+      repo: deb https://apt.kubernetes.io/ kubernetes-xenial main
+      state: present
+      filename: kubernetes.list
+
+  - name: Install Kubernetes binaries
+    apt: 
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+    vars:
+      packages:
+        - kubelet 
+        - kubeadm 
+        - kubectl
+
+  - name: Configure node ip
+    lineinfile:
+      path: /etc/default/kubelet
+      line: KUBELET_EXTRA_ARGS=--node-ip={{ node_ip }}
+      create: yes
+
+  - name: Restart kubelet
+    service:
+      name: kubelet
+      daemon_reload: yes
+      state: restarted
+
+  - name: Check if kubelet.service.d configuration registers cgroup-driver
+    become: yes
+    shell: 'cat /etc/systemd/system/kubelet.service.d/10-kubeadm.conf | grep "cgroup-driver" | cat'
+    register: cgroup_set
+
+  - name: Ensure kubeadm cgroup-driver is same as docker's cgroup-driver 
+    ansible.builtin.replace:
+            path: /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+            regexp: '(?<=cgroup-driver=)(\w+)'
+            replace: 'cgroupfs'
+    when: cgroup_set.stdout != ""
+
+  - name: If kubeadm have no cgoup-driver setting, add one (1)
+    ansible.builtin.lineinfile:
+            path: /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+            insertafter: "[Service]"
+            line: "Environment='KUBELET_CGROUP_ARGS=--cgroup-driver=cgroupfs'"
+    when: cgroup_set.stdout == ""
+
+  - name: If kubeadm have no cgoup-driver setting, add one (2)
+    ansible.builtin.replace:
+            path: /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+            regexp: 'ExecStart=\/usr\/bin\/kubelet'
+            replace: 'ExecStart=/usr/bin/kubelet $KUBELET_CGROUP_ARGS'
+    when: cgroup_set.stdout == ""
+
+  - name: Remove containerd config since by default it has `disabled_plugins = ["cri"]` (Container Runtime Interface)
+    ansible.builtin.file:
+      path: /etc/containerd/config.toml
+      state: absent
+
+  - name: Restart containerd service
+    ansible.builtin.systemd:
+      state: restarted
+      name: containerd
+
+
+  - name: Initialize the Kubernetes cluster using kubeadm
+    command: kubeadm init --apiserver-advertise-address="192.168.50.10" --apiserver-cert-extra-sans="192.168.50.10"  --node-name k8s-master --pod-network-cidr=10.90.0.0/16
+
+  - name: Setup kubeconfig for vagrant user
+    command: "{{ item }}"
+    with_items:
+     - mkdir -p /home/vagrant/.kube
+     - cp -i /etc/kubernetes/admin.conf /home/vagrant/.kube/config
+     - chown vagrant:vagrant /home/vagrant/.kube/config
+
+  - name: Install tigera operator
+    become: false
+    command: kubectl create -f https://projectcalico.docs.tigera.io/manifests/tigera-operator.yaml
+
+  - name: Download calico installation custom-resource (ipPools mod)
+    become: false
+    command: kubectl create -f https://projectcalico.docs.tigera.io/manifests/custom-resources.yaml
+
+  - name: Download calico installation custom-resource (ipPools mod)
+    get_url:
+      url: https://projectcalico.docs.tigera.io/manifests/custom-resources.yaml
+      dest: /home/vagrant/custom-resources.yaml
+      mode: '0777'
+
+  - name: Replace default calico ipPools with desired ipPools
+    ansible.builtin.replace:
+      path: /home/vagrant/custom-resources.yaml
+      regexp: '192.168.0.0/16'
+      replace: '10.90.0.0/16'
+
+  - name: Apply calico custom ipPools
+    become: false
+    command: kubectl apply -f /home/vagrant/custom-resources.yaml
+
+  - name: Download kubernetes_dashboard.yaml for installation
+    get_url:
+      url: https://raw.githubusercontent.com/kubernetes/dashboard/{{ kubernetes_dashboard_version }}/aio/deploy/recommended.yaml
+      dest: /home/vagrant/kubernetes_dashboard.yaml
+      mode: '0777'
+
+  - name: Install kubernetes dashboard
+    become: false
+    command: kubectl create -f /home/vagrant/kubernetes_dashboard.yaml
+
+  - name: Get kubernetes-dashboard service config
+    become: false
+    command: kubectl get svc -n kubernetes-dashboard kubernetes-dashboard -o yaml
+    register: kubernetes_dashboard_svc
+
+  - name: Save kubernetes-dashboard service config to file
+    copy:
+      content: "{{ kubernetes_dashboard_svc.stdout }}"
+      dest: "/home/vagrant/kubernetes-dashboard-svc.yaml"
+
+  - name: Expose dashboard - change from ClusterIP to NodePort
+    ansible.builtin.replace:
+      path: /home/vagrant/kubernetes-dashboard-svc.yaml
+      regexp: 'ClusterIP'
+      replace: 'NodePort'
+
+  - name: Apply kubernetes dashboard service changes
+    become: false
+    command: kubectl apply -f /home/vagrant/kubernetes-dashboard-svc.yaml
+
+  - name: Generate join command
+    command: kubeadm token create --print-join-command
+    register: join_command
+
+  - name: Copy join command to local file
+    become: false
+    local_action: copy content="{{ join_command.stdout_lines[0] }}" dest="./join-command"
+
+  - name: Create yaml file for dashboard admin-user configuration
+    blockinfile:
+      path: /home/vagrant/admin-user-sa.yaml
+      create: yes
+      block: |
+        apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: admin-user
+          namespace: kubernetes-dashboard
+        ---
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        metadata:
+          name: admin-user
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: ClusterRole
+          name: cluster-admin
+        subjects:
+        - kind: ServiceAccount
+          name: admin-user
+          namespace: kubernetes-dashboard
+
+  - name: Apply admin-user service account
+    become: false
+    command: kubectl apply -f /home/vagrant/admin-user-sa.yaml
+
+  - name: Create token for admin-user
+    become: false
+    command: !unsafe kubectl create token admin-user -n kubernetes-dashboard -o go-template="{{ template }}"
+    vars:
+      template: !unsafe "{{.status.token}}"
+    register: dashboard_admin_token
+  
+  - name: Save token for dashboard admin to file
+    copy:
+      content: "{{ dashboard_admin_token.stdout }}"
+      dest: "/home/vagrant/dashboard_admin_token.txt"
+
+  handlers:
+    - name: docker status
+      service: name=docker state=started
