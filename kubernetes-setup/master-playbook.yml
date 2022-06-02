@@ -204,6 +204,12 @@
       dest: /home/vagrant/kubernetes_dashboard.yaml
       mode: '0777'
 
+  - name: Change dashboard config, so token doesn't expire
+    replace:
+      path: /home/vagrant/kubernetes_dashboard.yaml
+      regexp: "- --namespace=kubernetes-dashboard"
+      replace: "- --namespace=kubernetes-dashboard\n            - --token-ttl=0"
+
   - name: Install kubernetes dashboard
     become: false
     command: kubectl create -f /home/vagrant/kubernetes_dashboard.yaml
