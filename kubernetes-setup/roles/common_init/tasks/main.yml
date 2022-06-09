@@ -1,7 +1,3 @@
----
-- hosts: all
-  become: true
-  tasks:
   - name: disable swap
     shell: |
       sudo swapoff -a
@@ -126,29 +122,17 @@
       - apt-transport-https
       - ca-certificates
       - curl
-      - gnupg-agent
-      - software-properties-common
 
-  - name: Add an apt signing key for Docker
-    apt_key:
-      url: https://download.docker.com/linux/debian/gpg
-      state: present
-
-  - name: Add apt repository for stable version
-    apt_repository:
-      repo: deb [arch=amd64] https://download.docker.com/linux/debian buster stable
-      state: present
-
-  - name: Add an apt signing key for Kubernetes
+  - name: Add an apt signilistng key for Kubernetes
     apt_key:
       url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
       state: present
 
-  - name: Adding apt repository for Kubernetes
+  - name: Add apt repository for Kubernetes
     apt_repository:
       repo: deb https://apt.kubernetes.io/ kubernetes-xenial main
       state: present
-      filename: kubernetes.list
+      filename: kubernetes
 
   - name: Install Kubernetes binaries
     apt: 
@@ -158,63 +142,11 @@
     vars:
       packages:
         - kubelet 
-        - kubeadm
+        - kubeadm   
         - kubectl
 
   - name: Configure node ip
     lineinfile:
       path: /etc/default/kubelet
-      line: KUBELET_EXTRA_ARGS=--node-ip={{ node_ip }}
+      line: KUBELET_EXTRA_ARGS=--node-ip={{ ansible_eth1.ipv4.address }}
       create: yes
-
-  - name: Copy join command from Ansiblehost to the worker nodes.
-    become: yes
-    copy:
-      src: join-command
-      dest: /tmp/kubernetes_join_command
-      mode: 0777
-
-  - name: Join the Worker nodes to the cluster.
-    become: yes
-    command: sh /tmp/kubernetes_join_command
-    register: joined_or_not
-
-  - name: Install packages that allow apt to be used over HTTPS
-    apt:
-      name: "{{ packages }}"
-      state: present
-      update_cache: yes
-    vars:
-      packages:
-      - apt-transport-https
-      - ca-certificates
-      - curl
-      - gnupg-agent
-      - software-properties-common
-
-  - name: Add an apt signing key for Docker
-    apt_key:
-      url: https://download.docker.com/linux/debian/gpg
-      state: present
-
-  - name: Add apt repository for stable version
-    apt_repository:
-      repo: deb [arch=amd64] https://download.docker.com/linux/debian buster stable
-      state: present
-  
-  - name: Install docker
-    apt: 
-      name: "{{ packages }}"
-      state: present
-      update_cache: yes
-    vars:
-      packages:
-      - docker-ce 
-      - docker-ce-cli 
-
-  - name: Add vagrant user to docker group
-    user:
-      name: vagrant
-      group: docker
-
-# - import_playbook: node-deploy-playbook.yml

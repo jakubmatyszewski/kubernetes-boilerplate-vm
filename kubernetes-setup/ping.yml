@@ -1,0 +1,6 @@
+---
+- hosts: all
+  become: true
+  tasks:
+  - name: Ping - provision is required for vagrant to create proper inventory
+    ansible.builtin.ping:

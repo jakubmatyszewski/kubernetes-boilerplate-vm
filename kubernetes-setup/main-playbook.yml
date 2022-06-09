@@ -1,0 +1,20 @@
+---
+- hosts: all
+  become: true
+  roles:
+    - role: common_init
+      tags: init
+
+- hosts: k8s-master
+  become: true
+  roles:
+    - role: master_init
+      tags: init
+      vars:
+        kubernetes_dashboard_version: v2.5.0
+
+- hosts: node-1
+  become: true
+  roles:
+    - role: node_init
+      tags: init

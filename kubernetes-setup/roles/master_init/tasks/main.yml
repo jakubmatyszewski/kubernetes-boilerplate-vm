@@ -1,0 +1,92 @@
+  - name: Initialize the cluster
+    shell: kubeadm init --apiserver-advertise-address="192.168.50.10" --apiserver-cert-extra-sans="192.168.50.10" --node-name k8s-master --pod-network-cidr=10.244.0.0/16
+    # 10.244.0.0/16 is default pod-cidr value in kube-flannel.yml
+
+  - name: Generate join command
+    command: kubeadm token create --print-join-command
+    register: join_command
+
+  - name: Copy join command to local file
+    become: false
+    local_action: copy content="{{ join_command.stdout_lines[0] }}" dest="./join-command"
+
+  - name: Create /home/vagrant/.kube dir
+    file:
+      path: /home/vagrant/.kube
+      state: directory
+
+  - name: Copy admin.conf to user's kube config
+    copy:
+      src: /etc/kubernetes/admin.conf
+      dest: /home/vagrant/.kube/config
+      remote_src: yes
+      owner: vagrant
+
+  - name: Get flannel manifest
+    get_url:
+      url: https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
+      dest: /home/vagrant/kube-flannel.yml
+      mode: '0777'
+
+  - name: Add --iface eth1 to bypass Vagrant's default interface
+    # https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/troubleshooting-kubeadm/#default-nic-when-using-flannel-as-the-pod-network-in-vagrant
+    replace:
+      path: /home/vagrant/kube-flannel.yml
+      regexp: "- --kube-subnet-mgr"
+      replace: "- --kube-subnet-mgr\n        - --iface=eth1"
+
+  - name:  Install flannel for k8s
+    become: false
+    command: kubectl apply -f /home/vagrant/kube-flannel.yml
+
+  - name: Install kubernetes dashboard
+    become: false
+    command: kubectl create -f https://raw.githubusercontent.com/kubernetes/dashboard/{{ kubernetes_dashboard_version }}/aio/deploy/recommended.yaml
+
+  - name: Get kubernetes-dashboard service config
+    become: false
+    command: kubectl get svc -n kubernetes-dashboard kubernetes-dashboard -o yaml
+    register: kubernetes_dashboard_svc
+
+  - name: Save kubernetes-dashboard service config to file
+    copy:
+      content: "{{ kubernetes_dashboard_svc.stdout }}"
+      dest: "/home/vagrant/kubernetes-dashboard-svc.yaml"
+
+  - name: Expose dashboard - change from ClusterIP to NodePort
+    ansible.builtin.replace:
+      path: /home/vagrant/kubernetes-dashboard-svc.yaml
+      regexp: 'ClusterIP'
+      replace: 'NodePort'
+
+  - name: Apply kubernetes dashboard service changes
+    become: false
+    command: kubectl apply -f /home/vagrant/kubernetes-dashboard-svc.yaml
+
+  - name: Create yaml file for dashboard admin-user configuration
+    blockinfile:
+      path: /home/vagrant/admin-user-sa.yaml
+      create: yes
+      block: |
+        apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: admin-user
+          namespace: kubernetes-dashboard
+        ---
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        metadata:
+          name: admin-user
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: ClusterRole
+          name: cluster-admin
+        subjects:
+        - kind: ServiceAccount
+          name: admin-user
+          namespace: kubernetes-dashboard
+
+  - name: Apply admin-user service account
+    become: false
+    command: kubectl apply -f /home/vagrant/admin-user-sa.yaml

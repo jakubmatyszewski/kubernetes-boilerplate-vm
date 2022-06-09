@@ -1,3 +1,4 @@
+.ansible_vault/
 .vagrant/
 venv/
 join-command

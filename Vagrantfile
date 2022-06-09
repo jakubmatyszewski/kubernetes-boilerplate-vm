@@ -13,7 +13,7 @@ Vagrant.configure("2") do |config|
 	    vb.cpus = 2
 	end
         master.vm.provision "ansible" do |ansible|
-	    ansible.playbook = "kubernetes-setup/master-playbook.yml"
+            ansible.playbook = "kubernetes-setup/ping.yml"
             ansible.extra_vars = {
                 node_ip: "192.168.50.10",
             }
@@ -31,7 +31,7 @@ Vagrant.configure("2") do |config|
 	    end
 	    node.vm.provision "ansible" do |ansible|
                 ansible.galaxy_command = 'ansible-galaxy collection install community.docker kubernetes.core'
-                ansible.playbook = "kubernetes-setup/node-playbook.yml"
+                ansible.playbook = "kubernetes-setup/ping.yml"
                 ansible.extra_vars = {
                     node_ip: "192.168.50.#{i + 10}",
                 }
